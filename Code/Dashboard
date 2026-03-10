@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECTE471 — Block Sorting Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: Arial, sans-serif;
+    background: #1a1a1a;
+    color: #ddd;
+    padding: 24px;
+  }
+
+  header {
+    margin-bottom: 20px;
+    padding-bottom: 14px;
+    border-bottom: 2px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+
+  header h1 { font-size: 1.3rem; color: #fff; }
+  header p  { font-size: 0.78rem; color: #888; margin-top: 4px; }
+
+  .status-pill {
+    font-size: 0.78rem;
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid #333;
+    background: #252525;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #ccc;
+  }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .connected    .dot { background: #2ecc71; }
+  .disconnected .dot { background: #e74c3c; }
+  .waiting      .dot { background: #f39c12; }
+
+  /* Mode bar */
+  .mode-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 18px;
+    font-size: 0.82rem;
+    color: #aaa;
+  }
+
+  .toggle-group {
+    display: flex;
+    border: 1px solid #444;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .toggle-btn {
+    padding: 5px 16px;
+    border: none;
+    background: #252525;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: #aaa;
+  }
+
+  .toggle-btn.active { background: #3a7bd5; color: #fff; }
+  .mode-hint { color: #666; font-size: 0.78rem; font-style: italic; }
+
+  /* Controls */
+  .controls { display: flex; gap: 10px; margin-bottom: 18px; }
+
+  .btn {
+    padding: 7px 18px;
+    border-radius: 4px;
+    border: 1px solid #444;
+    cursor: pointer;
+    font-size: 0.82rem;
+    background: #252525;
+    color: #ccc;
+  }
+
+  .btn-primary { background: #3a7bd5; color: #fff; border-color: #3a7bd5; }
+  .btn-danger  { color: #e74c3c; border-color: #6b2a2a; background: #2a1a1a; }
+  .btn:hover   { opacity: 0.85; }
+
+  /* KPI row */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .kpi {
+    background: #242424;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 16px 18px;
+  }
+
+  .kpi-label { font-size: 0.72rem; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+  .kpi-value { font-size: 2rem; font-weight: bold; margin: 4px 0 2px; }
+  .kpi-sub   { font-size: 0.7rem; color: #555; }
+
+  .kpi-value.blue   { color: #5b9cf6; }
+  .kpi-value.green  { color: #2ecc71; }
+  .kpi-value.orange { color: #e67e22; }
+  .kpi-value.red    { color: #e74c3c; }
+
+  /* Main grid */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+
+  .panel {
+    background: #242424;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 16px;
+  }
+
+  .panel-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    font-weight: bold;
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #333;
+  }
+
+  /* Conveyor bars */
+  .conv-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 0.78rem;
+  }
+
+  .conv-label { width: 90px; color: #aaa; white-space: nowrap; }
+
+  .bar-track {
+    flex: 1;
+    height: 10px;
+    background: #333;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+  }
+
+  .bar-fill.c1  { background: #3a7bd5; }
+  .bar-fill.c2  { background: #e67e22; }
+  .bar-fill.rej { background: #e74c3c; }
+
+  .bar-count { width: 20px; text-align: right; font-size: 0.78rem; color: #aaa; }
+
+  /* Category grid */
+  .cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  .cat-item {
+    border: 1px solid #333;
+    border-radius: 5px;
+    padding: 8px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.78rem;
+    background: #1e1e1e;
+  }
+
+  .cat-swatch { width: 11px; height: 11px; border-radius: 2px; flex-shrink: 0; }
+  .sw-blue   { background: #3a7bd5; }
+  .sw-yellow { background: #f1c40f; }
+  .sw-red    { background: #e74c3c; }
+  .sw-none   { background: #555; }
+
+  .cat-name { color: #666; font-size: 0.7rem; }
+  .cat-num  { font-weight: bold; font-size: 1rem; color: #eee; }
+
+  /* Fusion gauge */
+  .gauge-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 12px;
+    padding: 10px 0;
+  }
+
+  .gauge-big { font-size: 3rem; font-weight: bold; color: #5b9cf6; }
+
+  .gauge-sub {
+    font-size: 0.75rem;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+
+  .gauge-label {
+    font-size: 0.85rem;
+    font-weight: bold;
+    padding: 3px 14px;
+    border-radius: 4px;
+  }
+
+  .gauge-label.high   { background: #1a3d2b; color: #2ecc71; }
+  .gauge-label.medium { background: #3d3000; color: #f39c12; }
+  .gauge-label.low    { background: #3d1a1a; color: #e74c3c; }
+
+  /* Chart */
+  #arrivalChart { width: 100%; height: 110px; display: block; }
+
+  /* Log */
+  .log-scroll {
+    max-height: 170px;
+    overflow-y: auto;
+    font-size: 0.75rem;
+    font-family: monospace;
+  }
+
+  .log-scroll::-webkit-scrollbar { width: 4px; }
+  .log-scroll::-webkit-scrollbar-track { background: transparent; }
+  .log-scroll::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+
+  .log-entry {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid #2a2a2a;
+    align-items: center;
+  }
+
+  .log-time   { color: #555; flex-shrink: 0; }
+  .log-colour { width: 11px; height: 11px; border-radius: 2px; flex-shrink: 0; }
+  .log-text   { flex: 1; color: #ccc; }
+  .log-action { color: #5b9cf6; flex-shrink: 0; }
+
+  .log-source {
+    font-size: 0.62rem;
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-weight: bold;
+    flex-shrink: 0;
+  }
+  .log-source.live { background: #1a3d2b; color: #2ecc71; }
+  .log-source.sim  { background: #1a2a3d; color: #5b9cf6; }
+
+  .span-2 { grid-column: span 2; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>ECTE471 — Block Sorting Dashboard</h1>
+    <p id="headerTime">Robotic Sorting System · Initialising...</p>
+  </div>
+  <div class="status-pill waiting" id="statusPill">
+    <div class="dot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<div class="mode-bar">
+  <span>Input Mode:</span>
+  <div class="toggle-group">
+    <button class="toggle-btn active" id="btnLive" onclick="setMode('live')">Live Camera</button>
+    <button class="toggle-btn"        id="btnSim"  onclick="setMode('sim')">Simulation</button>
+  </div>
+  <span class="mode-hint" id="modeHint">Polling http://localhost:5050 — press SPACE in webcam window to classify</span>
+</div>
+
+<div class="controls" id="simControls" style="display:none">
+  <button class="btn btn-primary" onclick="addRandomBlock()">Simulate Block</button>
+  <button class="btn"             onclick="runBatch()">Run Batch ×5</button>
+  <button class="btn btn-danger"  onclick="resetAll()">Reset</button>
+</div>
+
+<div class="kpi-row">
+  <div class="kpi">
+    <div class="kpi-label">Total Sorted</div>
+    <div class="kpi-value blue" id="kpiTotal">0</div>
+    <div class="kpi-sub">blocks processed</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Conveyor 1</div>
+    <div class="kpi-value green" id="kpiC1">0</div>
+    <div class="kpi-sub">blocks dispatched</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Conveyor 2</div>
+    <div class="kpi-value orange" id="kpiC2">0</div>
+    <div class="kpi-sub">blocks dispatched</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Rejected</div>
+    <div class="kpi-value red" id="kpiRej">0</div>
+    <div class="kpi-sub">dropped / rotated</div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <div class="panel">
+    <div class="panel-title">Conveyor Distribution</div>
+    <div class="conv-row">
+      <div class="conv-label">Conv. 1 (Blue)</div>
+      <div class="bar-track"><div class="bar-fill c1" id="bar1" style="width:0%"></div></div>
+      <div class="bar-count" id="barNum1">0</div>
+    </div>
+    <div class="conv-row">
+      <div class="conv-label">Conv. 2 (Blue)</div>
+      <div class="bar-track"><div class="bar-fill c1" id="bar2" style="width:0%"></div></div>
+      <div class="bar-count" id="barNum2">0</div>
+    </div>
+    <div class="conv-row">
+      <div class="conv-label">Conv. 1 (Yellow)</div>
+      <div class="bar-track"><div class="bar-fill c2" id="bar3" style="width:0%"></div></div>
+      <div class="bar-count" id="barNum3">0</div>
+    </div>
+    <div class="conv-row">
+      <div class="conv-label">Conv. 2 (Yellow)</div>
+      <div class="bar-track"><div class="bar-fill c2" id="bar4" style="width:0%"></div></div>
+      <div class="bar-count" id="barNum4">0</div>
+    </div>
+    <div class="conv-row">
+      <div class="conv-label">Drop / Rotate</div>
+      <div class="bar-track"><div class="bar-fill rej" id="bar5" style="width:0%"></div></div>
+      <div class="bar-count" id="barNum5">0</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Block Categories</div>
+    <div class="cat-grid">
+      <div class="cat-item"><div class="cat-swatch sw-blue"></div><div><div class="cat-name">Blue DXB</div><div class="cat-num" id="cat_blue_DXB">0</div></div></div>
+      <div class="cat-item"><div class="cat-swatch sw-blue"></div><div><div class="cat-name">Blue SHJ</div><div class="cat-num" id="cat_blue_SHJ">0</div></div></div>
+      <div class="cat-item"><div class="cat-swatch sw-yellow"></div><div><div class="cat-name">Yellow DXB</div><div class="cat-num" id="cat_yellow_DXB">0</div></div></div>
+      <div class="cat-item"><div class="cat-swatch sw-yellow"></div><div><div class="cat-name">Yellow SHJ</div><div class="cat-num" id="cat_yellow_SHJ">0</div></div></div>
+      <div class="cat-item"><div class="cat-swatch sw-red"></div><div><div class="cat-name">Red (drop)</div><div class="cat-num" id="cat_red_none">0</div></div></div>
+      <div class="cat-item"><div class="cat-swatch sw-none"></div><div><div class="cat-name">Unknown (rotate)</div><div class="cat-num" id="cat_none_none">0</div></div></div>
+    </div>
+  </div>
+
+  <div class="panel" style="display:flex;flex-direction:column;">
+    <div class="panel-title">Avg Fusion Score</div>
+    <div class="gauge-wrap">
+      <div class="gauge-big" id="gaugePct">0%</div>
+      <div class="gauge-sub">Colour 55% · Text 45%</div>
+      <div class="gauge-label low" id="fusionLabel">LOW</div>
+    </div>
+  </div>
+
+  <div class="panel span-2">
+    <div class="panel-title">Block Arrivals (last 20)</div>
+    <canvas id="arrivalChart"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Event Log</div>
+    <div class="log-scroll" id="logScroll"></div>
+  </div>
+
+</div>
+
+<script>
+const state = {
+  total:0, c1:0, c2:0, rej:0,
+  bins:{blue_DXB:0,blue_SHJ:0,yellow_DXB:0,yellow_SHJ:0,red_none:0,none_none:0},
+  bars:[0,0,0,0,0], arrivals:[], fusionScores:[],
+};
+
+let currentMode='live', pollInterval=null, lastSeenJSON=null;
+
+function setMode(mode) {
+  currentMode=mode;
+  document.getElementById('btnLive').classList.toggle('active',mode==='live');
+  document.getElementById('btnSim').classList.toggle('active',mode==='sim');
+  document.getElementById('simControls').style.display=mode==='sim'?'flex':'none';
+  if(mode==='live'){
+    document.getElementById('modeHint').textContent='Polling http://localhost:5050 — press SPACE in webcam window to classify';
+    startPolling();
+  } else {
+    document.getElementById('modeHint').textContent='Simulation mode — use buttons above to generate test blocks';
+    stopPolling(); setStatus('idle');
+  }
+}
+
+function setStatus(s) {
+  const pill=document.getElementById('statusPill'), txt=document.getElementById('statusText');
+  pill.className='status-pill';
+  if(s==='connected')   {pill.classList.add('connected');    txt.textContent='API Connected';}
+  else if(s==='error')  {pill.classList.add('disconnected'); txt.textContent='API Offline';}
+  else if(s==='waiting'){pill.classList.add('waiting');      txt.textContent='Waiting for block...';}
+  else                  {pill.classList.add('waiting');      txt.textContent='Simulation Mode';}
+}
+
+function startPolling(){stopPolling();setStatus('waiting');fetchLatestBlock();pollInterval=setInterval(fetchLatestBlock,1000);}
+function stopPolling(){if(pollInterval){clearInterval(pollInterval);pollInterval=null;}}
+
+async function fetchLatestBlock() {
+  try {
+    const res=await fetch('http://localhost:5050',{cache:'no-store'});
+    if(!res.ok) throw new Error();
+    const block=await res.json();
+    if(!block||!block.action){setStatus('waiting');return;}
+    const fp=JSON.stringify(block);
+    if(fp===lastSeenJSON){setStatus('connected');return;}
+    lastSeenJSON=fp; setStatus('connected');
+    processBlock({colour:block.colour??null,text:block.text??null,action:block.action,
+      conveyor:block.conveyor??null,speed:block.speed??null,
+      cConf:block.colour_conf??0,tConf:block.text_conf??0,source:'live'});
+  } catch(e){setStatus('error');}
+}
+
+const BLOCK_TYPES=[
+  {colour:'blue',  text:'DXB',action:'place',conveyor:1,speed:50, cConf:0.85,tConf:0.78},
+  {colour:'blue',  text:'SHJ',action:'place',conveyor:2,speed:50, cConf:0.79,tConf:0.65},
+  {colour:'yellow',text:'DXB',action:'place',conveyor:1,speed:20, cConf:0.88,tConf:0.71},
+  {colour:'yellow',text:'SHJ',action:'place',conveyor:2,speed:20, cConf:0.81,tConf:0.60},
+  {colour:'red',   text:null, action:'drop', conveyor:null,speed:null,cConf:0.93,tConf:0.00},
+  {colour:null,    text:null, action:'rotate',conveyor:null,speed:null,cConf:0.20,tConf:0.10},
+];
+
+const canvas=document.getElementById('arrivalChart'), ctx=canvas.getContext('2d');
+
+function drawChart(){
+  const data=state.arrivals.slice(-20);
+  canvas.width=canvas.offsetWidth; canvas.height=110;
+  const w=canvas.width,h=canvas.height;
+  ctx.clearRect(0,0,w,h);
+  if(data.length<2)return;
+  const max=Math.max(...data,1),step=w/(data.length-1);
+  ctx.strokeStyle='#2a2a2a';ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=h-(i/4)*h;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,'rgba(91,156,246,0.25)');grad.addColorStop(1,'rgba(91,156,246,0.02)');
+  ctx.beginPath();ctx.moveTo(0,h-(data[0]/max)*h);
+  data.forEach((v,i)=>ctx.lineTo(i*step,h-(v/max)*h));
+  ctx.lineTo((data.length-1)*step,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+  ctx.beginPath();ctx.strokeStyle='#5b9cf6';ctx.lineWidth=2;
+  data.forEach((v,i)=>{const x=i*step,y=h-(v/max)*h;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});ctx.stroke();
+  data.forEach((v,i)=>{ctx.beginPath();ctx.arc(i*step,h-(v/max)*h,3,0,Math.PI*2);ctx.fillStyle='#5b9cf6';ctx.fill();});
+}
+
+function updateGauge(score){
+  const pct=Math.round(score*100);
+  document.getElementById('gaugePct').textContent=pct+'%';
+  const el=document.getElementById('fusionLabel');
+  if(pct>=75){el.textContent='HIGH';el.className='gauge-label high';}
+  else if(pct>=45){el.textContent='MEDIUM';el.className='gauge-label medium';}
+  else{el.textContent='LOW';el.className='gauge-label low';}
+}
+
+const swatchMap={blue:'sw-blue',yellow:'sw-yellow',red:'sw-red',null:'sw-none'};
+
+function addLogEntry(block){
+  const log=document.getElementById('logScroll');
+  const now=new Date().toLocaleTimeString('en-GB',{hour12:false});
+  const cat=`${block.colour||'?'} ${block.text||'—'}`.toUpperCase();
+  const act=block.action==='place'?`→ Conv. ${block.conveyor}`:block.action==='drop'?'✗ DROP':'↻ ROTATE';
+  const fusion=(0.55*block.cConf+0.45*block.tConf).toFixed(2);
+  const srcCls=block.source==='live'?'live':'sim';
+  const el=document.createElement('div');
+  el.className='log-entry';
+  el.innerHTML=`<span class="log-time">${now}</span><span class="log-source ${srcCls}">${srcCls.toUpperCase()}</span><div class="log-colour ${swatchMap[block.colour]}"></div><span class="log-text">${cat} · f=${fusion}</span><span class="log-action">${act}</span>`;
+  log.prepend(el);
+  while(log.children.length>50)log.removeChild(log.lastChild);
+}
+
+function processBlock(block){
+  const fusion=0.55*block.cConf+0.45*block.tConf;
+  state.fusionScores.push(fusion);state.total++;state.arrivals.push(state.total);
+  const key=`${block.colour||'none'}_${block.text||'none'}`;
+  if(state.bins[key]!==undefined)state.bins[key]++;
+  if(block.action==='place'){
+    if(block.conveyor===1){block.speed===50?state.bars[0]++:state.bars[2]++;state.c1++;}
+    else{block.speed===50?state.bars[1]++:state.bars[3]++;state.c2++;}
+  }else{state.bars[4]++;state.rej++;}
+  updateUI();addLogEntry(block);
+}
+
+function updateUI(){
+  document.getElementById('kpiTotal').textContent=state.total;
+  document.getElementById('kpiC1').textContent=state.c1;
+  document.getElementById('kpiC2').textContent=state.c2;
+  document.getElementById('kpiRej').textContent=state.rej;
+  Object.keys(state.bins).forEach(k=>{const el=document.getElementById(`cat_${k}`);if(el)el.textContent=state.bins[k];});
+  const maxBar=Math.max(...state.bars,1);
+  state.bars.forEach((v,i)=>{document.getElementById(`bar${i+1}`).style.width=`${(v/maxBar)*100}%`;document.getElementById(`barNum${i+1}`).textContent=v;});
+  const avg=state.fusionScores.length?state.fusionScores.reduce((a,b)=>a+b,0)/state.fusionScores.length:0;
+  updateGauge(avg);drawChart();
+  document.getElementById('headerTime').textContent=`ECTE471 · ${new Date().toLocaleString()} · Total blocks: ${state.total}`;
+}
+
+function addRandomBlock(){
+  const b=BLOCK_TYPES[Math.floor(Math.random()*BLOCK_TYPES.length)];
+  processBlock({...b,cConf:Math.min(1,b.cConf+(Math.random()-0.5)*0.1),tConf:Math.min(1,b.tConf+(Math.random()-0.5)*0.1),source:'sim'});
+}
+
+function runBatch(){let i=0;const iv=setInterval(()=>{addRandomBlock();if(++i>=5)clearInterval(iv);},500);}
+
+function resetAll(){
+  state.total=0;state.c1=0;state.c2=0;state.rej=0;state.arrivals=[];state.fusionScores=[];
+  Object.keys(state.bins).forEach(k=>state.bins[k]=0);state.bars.fill(0);
+  document.getElementById('logScroll').innerHTML='';lastSeenJSON=null;
+  updateUI();updateGauge(0);
+}
+
+updateUI();
+setMode('live');
+window.addEventListener('resize',()=>{canvas.width=canvas.offsetWidth;drawChart();});
+</script>
+</body>
+</html>
