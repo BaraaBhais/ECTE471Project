@@ -1,0 +1,182 @@
+#!/usr/bin/env pybricks-micropython
+
+from pybricks.hubs import EV3Brick
+from pybricks.ev3devices import Motor, UltrasonicSensor
+from pybricks.parameters import Port, Direction
+from pybricks.tools import wait
+
+
+# Setup
+
+ev3 =EV3Brick()
+left_motor = Motor(Port.A, Direction.COUNTERCLOCKWISE)
+right_motor = Motor(Port.B)
+us_front= UltrasonicSensor(Port.S2)
+us_right = UltrasonicSensor(Port.S6)
+us_left= UltrasonicSensor(Port.S7)
+
+
+# Settings
+
+SPEED       = 150    # forward speed
+TURN_SPEED  = 100    # turning speed
+TURN_MS     = 750    # ms for 90° pivot
+STEP_MS     = 250    # ms forward after a turn
+FRONT_STOP  = 350    # mm — wall ahead threshold
+SIDE_WALL   = 350    # mm — side wall detected threshold
+DEAD_F      = 200    # mm — dead end front
+DEAD_L      = 200    # mm — dead end left
+DEAD_R      = 450    # mm — dead end right
+CORRECT_KP  = 0.4    # proportional gain for wall correction
+TARGET_DIST = 150    # mm — ideal distance from right wall
+
+
+# Helpers
+def read_sensors():
+    """Read all sensors 3x and return the median to filter noise."""
+    readings = [(us_front.distance(), us_left.distance(), us_right.distance()) for _ in range(3)]
+    f = sorted([r[0] for r in readings])[1]
+    l = sorted([r[1] for r in readings])[1]
+    r = sorted([r[2] for r in readings])[1]
+    return f, l, r
+
+def stop(ms=100):
+    left_motor.stop()
+    right_motor.stop()
+    wait(ms)
+
+def go_forward(ms=300, correction=0):
+    """Drive forward with optional steering correction."""
+    left_motor.run(SPEED - correction)
+    right_motor.run(SPEED + correction)
+    wait(ms)
+
+def turn_left_90():
+    stop(80)
+    left_motor.run(-TURN_SPEED)
+    right_motor.run(TURN_SPEED)
+    wait(TURN_MS)
+    stop(80)
+    go_forward(STEP_MS)
+
+def turn_right_90():
+    stop(80)
+    left_motor.run(TURN_SPEED)
+    right_motor.run(-TURN_SPEED)
+    wait(TURN_MS)
+    stop(80)
+    go_forward(STEP_MS)
+
+def turn_around():
+    """180° turn for dead ends."""
+    stop(80)
+    left_motor.run(TURN_SPEED)
+    right_motor.run(-TURN_SPEED)
+    wait(TURN_MS * 2)
+    stop(80)
+
+def wall_correction(r):
+
+    if r < SIDE_WALL:
+        error = TARGET_DIST - r
+        return int(error * CORRECT_KP)
+    return 0
+
+def beep(count=1):
+    for _ in range(count):
+        ev3.speaker.beep()
+        wait(200)
+
+
+# States
+OUTWARD = 0
+RETURN  = 1
+IDLE    = 2
+state   = OUTWARD
+
+consecutive_open = 0 # tracks open-front readings to avoid phantom stops
+stuck_counter    = 0  # detects if robot is stuck
+
+print("=== Maze started ===")
+beep(1)
+
+prev_f = 9999
+
+while True:
+    f, l, r = read_sensors()
+    print("S={} F={:.0f} L={:.0f} R={:.0f}".format(state, f, l, r))
+
+    # ── Stuck detection ───────────────────────
+    if abs(f - prev_f) < 5 and f < FRONT_STOP:
+        stuck_counter += 1
+    else:
+        stuck_counter = 0
+    prev_f = f
+
+    if stuck_counter > 10:
+        print(">> Stuck! Backing up...")
+        left_motor.run(-SPEED)
+        right_motor.run(-SPEED)
+        wait(400)
+        stop()
+        stuck_counter = 0
+        continue
+
+    # ── OUTWARD: right-hand wall follow ───────
+    if state == OUTWARD:
+
+        # Dead end = Station B
+        if f < DEAD_F and l < DEAD_L and r < DEAD_R:
+            stop(200)
+            beep(3)
+            print(">> Station B reached!")
+            wait(2000)
+            state = RETURN
+            print(">> Returning...")
+
+        # Wall ahead
+        elif f < FRONT_STOP:
+            if r > SIDE_WALL:
+                # Right is open  turn right instead of left
+                turn_right_90()
+            else:
+                turn_left_90()
+
+        # No right wall turn right to follow it
+        elif r > SIDE_WALL:
+            turn_right_90()
+
+        # Right wall present  go forward with wall correction
+        else:
+            correction = wall_correction(r)
+            go_forward(200, correction)
+
+    # RETURN: left-hand wall follow 
+    elif state == RETURN:
+
+        # Back at start — open corridor ahead with no side walls
+        if f > 1500 and l > SIDE_WALL and r > SIDE_WALL:
+            stop(300)
+            beep(2)
+            print(">> Back at start! Done.")
+            state = IDLE
+
+        # Wall ahead
+        elif f < FRONT_STOP:
+            if l > SIDE_WALL:
+                turn_left_90()
+            else:
+                turn_right_90()
+
+        # No left wall → turn left to follow it
+        elif l > SIDE_WALL:
+            turn_left_90()
+
+        # Left wall present → go forward with wall correction
+        else:
+            correction = wall_correction(l) * -1   # flip for left wall
+            go_forward(200, correction)
+
+    # ── IDLE ──────────────────────────────────
+    elif state == IDLE:
+        stop()
