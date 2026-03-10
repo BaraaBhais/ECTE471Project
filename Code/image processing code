@@ -1,0 +1,411 @@
+import cv2
+import numpy as np
+import pytesseract
+import json
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Tesseract path (Windows users — update this)
+pytesseract.pytesseract.tesseract_cmd= r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+# Shared latest result (updated on each classify)
+latest_result =None
+result_lock = threading.Lock()
+
+
+# Local HTTP API Server (port 5050)
+class DashboardHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        with result_lock:
+            payload = json.dumps(latest_result or {}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(payload)))
+        self.send_header("Access-Control-Allow-Origin","*")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass  # silence per-request console noise
+
+
+def start_api(port=5050):
+    """Start the dashboard API in a background daemon thread."""
+    server= HTTPServer(("localhost", port), DashboardHandler)
+    thread =threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[API] Dashboard feed running at http://localhost:{port}")
+
+
+# Action Lookup Table
+ACTION_TABLE = {
+    ("blue","DXB"): {"action":"place", "conveyor": 1,"speed": 50},
+    ("blue", "SHJ"): {"action": "place","conveyor": 2,"speed":50},
+    ("yellow", "DXB"): {"action": "place", "conveyor":1, "speed": 20},
+    ("yellow", "SHJ"): {"action": "place","conveyor": 2,"speed": 20},
+    ("red", None):  {"action": "drop", "conveyor": None,"speed":None},
+    (None, None):  {"action": "rotate","conveyor":None,"speed": None},
+}
+
+# HSV colour ranges
+
+COLOUR_HSV_RANGES ={
+    "red": [
+        (np.array([0, 120, 70]), np.array([10,255, 255])),
+        (np.array([160, 120, 70]), np.array([180, 255,255])),
+    ],
+    "blue":[
+        (np.array([85, 80, 80]), np.array([135,255, 255])),
+    ],
+    "yellow": [
+        (np.array([20,100, 100]), np.array([35, 255,255])),
+    ],
+}
+
+
+# Colour Detection
+
+def detect_colour(image_bgr):
+    """
+    Detects the dominant colour (red/blue/yellow) of a block in the image.
+    Returns: (colour_string, confidence_0_to_1)
+    """
+    hsv = cv2.cvtColor(image_bgr,cv2.COLOR_BGR2HSV)
+    total_pixels =hsv.shape[0] * hsv.shape[1]
+    scores ={}
+
+    for colour,ranges in COLOUR_HSV_RANGES.items():
+        mask =np.zeros(hsv.shape[:2], dtype=np.uint8)
+        for (lo, hi) in ranges:
+            mask= cv2.bitwise_or(mask, cv2.inRange(hsv, lo, hi))
+        scores[colour] = cv2.countNonZero(mask) / total_pixels
+
+    best_colour= max(scores, key=scores.get)
+    confidence =scores[best_colour]
+
+    if confidence< 0.05:
+        return None, 0.0
+
+    return best_colour,round(confidence, 3)
+
+
+# Crop to Block using Colour Mask
+
+def crop_block(image_bgr, padding=10):
+    """
+    Locates the coloured block in the webcam frame by finding the largest
+    red/blue/yellow blob and crops tightly to it.
+
+    This approach works with cluttered backgrounds because it targets the
+    specific hue of the block rather than trying to remove the background.
+    Falls back to the full frame if no sufficiently large blob is found.
+    """
+    hsv = cv2.cvtColor(image_bgr,cv2.COLOR_BGR2HSV)
+
+    # Build one mask covering all target colours
+    combined_mask= np.zeros(hsv.shape[:2], dtype=np.uint8)
+    for ranges in COLOUR_HSV_RANGES.values():
+        for lo, hi in ranges:
+            combined_mask =cv2.bitwise_or(combined_mask,cv2.inRange(hsv,lo, hi))
+
+    # Morphological cleanup: fill holes, remove small noise blobs
+    kernel= cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    combined_mask =cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE,kernel)
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN,  kernel)
+
+    contours, _ = cv2.findContours(combined_mask,cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        x, y, w,h =cv2.boundingRect(c)
+
+        # Ignore tiny blobs (colour reflections in background)
+        area_ratio = (w * h) /(image_bgr.shape[0] * image_bgr.shape[1])
+        if area_ratio > 0.01:
+            x1 = max(0,x - padding)
+            y1= max(0, y - padding)
+            x2=min(image_bgr.shape[1], x +w + padding)
+            y2 =min(image_bgr.shape[0], y + h +padding)
+            return image_bgr[y1:y2,x1:x2]
+
+    # Fallback: full frame
+    return image_bgr
+
+
+# Text Extraction (OCR) — Robust Webcam Build
+def extract_text(image_bgr):
+    """
+    Extracts DXB or SHJ from a coloured block under real webcam conditions.
+
+    Tested failure modes and their fixes:
+      - Webcam sensor noise          → median blur before OCR
+      - Block held at an angle       → scan 0/90/180/270 degree rotations
+      - Block small/far from camera  → 2x upscale before OCR
+      - Light text on dark bg        → also try inverted image
+      - Uneven lighting / glare      → CLAHE + adaptive threshold variant
+
+    Returns: (text, confidence)  where text is "DXB", "SHJ", or None
+    """
+    candidates =[]
+    gray= cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    h, w =gray.shape
+
+    def try_ocr(img_in, psm=6):
+        """Run Tesseract and collect any DXB/SHJ hits with their confidence."""
+        cfg = f"--psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        try:
+            data= pytesseract.image_to_data(
+                img_in,config=cfg, output_type=pytesseract.Output.DICT
+            )
+            for i, word in enumerate(data["text"]):
+                word =word.strip().upper()
+                conf_raw= data["conf"][i]
+                conf =int(conf_raw) if str(conf_raw) != "-1" else 0
+                if word in ("DXB", "SHJ") and conf> 20:
+                    candidates.append((word, conf /100.0))
+        except Exception:
+            pass
+
+    # Median blur — best for webcam noise, preserves text edges
+    clean = cv2.medianBlur(gray,3)
+    inv = cv2.bitwise_not(clean)
+
+    # 2x upscale — helps when block is small/far in the frame
+    up2 = cv2.resize(clean, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    up2_inv =cv2.bitwise_not(up2)
+
+    # CLAHE + adaptive threshold for uneven lighting and glare
+    clahe= cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8, 8))
+    enhanced =clahe.apply(gray)
+    adaptive=cv2.adaptiveThreshold(
+        enhanced, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY, 11, 2
+    )
+
+    # Strategy 1: plain grayscale (dark text on bright colour bg) 
+    try_ocr(clean, psm=6)
+    try_ocr(clean, psm=7)
+    try_ocr(inv,psm=6)
+    try_ocr(inv, psm=7)
+
+    # Early exit on high confidence
+    if candidates and max(c for _, c in candidates) > 0.80:
+        return max(candidates,key=lambda x: x[1])[0], round(max(c for _, c in candidates), 3)
+
+    #Strategy 2: upscaled (block small in frame) 
+    try_ocr(up2, psm=6)
+    try_ocr(up2,psm=8)
+    try_ocr(up2_inv, psm=6)
+    try_ocr(up2_inv,psm=8)
+
+    # Strategy 3: CLAHE + adaptive threshold (lighting / glare) 
+    try_ocr(adaptive, psm=6)
+    try_ocr(cv2.bitwise_not(adaptive), psm=6)
+
+    # Strategy 4: rotation scan (tilted block on conveyor)
+    # Only runs if nothing found yet slower but catches angled blocks
+    if not candidates:
+        cx, cy = w // 2, h// 2
+        for angle in [90, 180, 270, 45, 135, 225, 315]:
+            M = cv2.getRotationMatrix2D((cx, cy), angle,1)
+            rot =cv2.warpAffine(clean, M, (w, h))
+            try_ocr(rot, psm=6)
+            try_ocr(rot, psm=11)   # PSM 11 = sparse text, ignores layout
+            if candidates:
+                break
+
+    if not candidates:
+        return None, 0.0
+
+    best_text,best_conf = max(candidates, key=lambda x: x[1])
+    return best_text, round(best_conf,3)
+
+
+# Main Classifier
+def classify_block(image_bgr, debug=False):
+    """
+    Full pipeline: crop → colour → OCR → lookup action.
+
+    Returns dict:
+    {
+        "colour":       "blue" | "yellow" | "red" | None,
+        "text":         "DXB"  | "SHJ"   | None,
+        "action":       "place" | "drop" | "rotate",
+        "conveyor":     1 | 2 | None,
+        "speed":        50 | 20 | None,
+        "colour_conf":  float,
+        "text_conf":    float,
+        "fusion_score": float
+    }
+    """
+    cropped = crop_block(image_bgr)
+    colour, c_conf =detect_colour(cropped)
+    text, t_conf= extract_text(cropped)
+
+    if colour == "red":
+        result= ACTION_TABLE[("red", None)].copy()
+    else:
+        lookup_key = (colour,text)
+        result = ACTION_TABLE.get(lookup_key, ACTION_TABLE[(None, None)]).copy()
+
+    result["colour"] = colour
+    result["text"] = text
+    result["colour_conf"] = c_conf
+    result["text_conf"] = t_conf
+    result["fusion_score"] =round(0.55 * c_conf +0.45 * t_conf, 3)
+
+    if debug:
+        print(f"\n{'='*45}")
+        print(f" Colour: {colour} (conf={c_conf:.2f})")
+        print(f" Text: {text} (conf={t_conf:.2f})")
+        print(f"  Action:{result['action']}")
+        if result["conveyor"]:
+            print(f" Conveyor:{result['conveyor']} @ {result['speed']}mm/s")
+        print(f"  Fusion: {result['fusion_score']:.2f}")
+        print(f"{'='*45}\n")
+
+    return result
+
+
+# Live Webcam Mode
+def run_live_camera(camera_index=0, dashboard_callback=None):
+    """
+    Opens webcam and classifies blocks in real-time.
+    Press SPACE to classify current frame, Q to quit.
+    dashboard_callback(result): optional function called on each classification.
+    """
+    global latest_result
+
+    # Start the dashboard API before opening the webcam
+    start_api(port=5050)
+
+    cap= cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        print("[ERROR] Cannot open camera.")
+        return
+
+    print("[CAMERA] Live mode started. Press SPACE to classify, Q to quit.")
+    results_log =[]
+    last_result= None
+
+    while True:
+        ret, frame =cap.read()
+        if not ret:
+            break
+
+        display= frame.copy()
+        cv2.putText(display,"SPACE=Classify  Q=Quit", (10,30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7,(255,255, 0), 2)
+
+        # Keep last result on screen between captures
+        if last_result:
+            label =(f"{last_result['colour']} | {last_result['text']} "
+                     f"-> {last_result['action']}")
+            cv2.putText(display, label, (10,70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8,(0, 255, 0), 2)
+            score_label = (f"colour={last_result['colour_conf']:.2f}  "
+                           f"text={last_result['text_conf']:.2f}  "
+                           f"fusion={last_result['fusion_score']:.2f}")
+            cv2.putText(display, score_label, (10,110),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55,(200,200, 255), 1)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord(' '):
+            print("[INFO] Classifying...")
+            last_result= classify_block(frame, debug=True)
+            results_log.append(last_result)
+
+            # Push to dashboard API 
+            with result_lock:
+                latest_result= last_result
+
+            if dashboard_callback:
+                dashboard_callback(last_result)
+
+        elif key== ord('q'):
+            break
+
+        cv2.imshow("ECTE471 Block Classifier", display)
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    with open("classification_log.json","w") as f:
+        json.dump(results_log, f, indent=2)
+    print(f"[LOG] Saved {len(results_log)} classifications to classification_log.json")
+    return results_log
+
+
+# Image File Mode
+def classify_from_file(image_path, debug=True):
+    """Classify a block from a saved image file."""
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"[ERROR] Cannot load image: {image_path}")
+        return None
+    return classify_block(img, debug=debug)
+
+
+# Debug Helper: save all preprocessing stages
+def debug_preprocessing(image_bgr, out_dir="debug_frames"):
+    """
+    Saves every preprocessing stage to disk so you can visually inspect
+    what Tesseract is seeing. Run this if OCR is still unreliable.
+
+    Usage:
+        img = cv2.imread("myblock.jpg")
+        debug_preprocessing(img)
+        # then check the debug_frames/ folder
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    cv2.imwrite(f"{out_dir}/00_original.png",image_bgr)
+
+    cropped= crop_block(image_bgr)
+    cv2.imwrite(f"{out_dir}/01_cropped.png", cropped)
+
+    gray =cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite(f"{out_dir}/02_gray.png", gray)
+
+    clean= cv2.medianBlur(gray, 3)
+    cv2.imwrite(f"{out_dir}/03_median_blur.png", clean)
+    cv2.imwrite(f"{out_dir}/04_inverted.png",cv2.bitwise_not(clean))
+
+    up2 = cv2.resize(clean, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    cv2.imwrite(f"{out_dir}/05_upscaled_2x.png", up2)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced =clahe.apply(gray)
+    adaptive= cv2.adaptiveThreshold(
+        enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    cv2.imwrite(f"{out_dir}/06_clahe_adaptive.png", adaptive)
+    cv2.imwrite(f"{out_dir}/07_clahe_adaptive_inverted.png", cv2.bitwise_not(adaptive))
+
+    h, w= gray.shape
+    for angle in [90, 180, 270]:
+        M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1)
+        rot =cv2.warpAffine(clean, M, (w, h))
+        cv2.imwrite(f"{out_dir}/08_rotated_{angle}.png",rot)
+
+    print(f"[DEBUG] Saved preprocessing frames to '{out_dir}/'")
+
+
+# Entry Point
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+        if arg =="--debug-preprocess" and len(sys.argv) > 2:
+            # python image_processing2.py --debug-preprocess myblock.jpg
+            img =cv2.imread(sys.argv[2])
+            if img is not None:
+                debug_preprocessing(img)
+            else:
+                print(f"[ERROR] Cannot load:{sys.argv[2]}")
+        else:
+            # python image_processing2.py myblock.jpg
+            classify_from_file(arg, debug=True)
+    else:
+        run_live_camera()
